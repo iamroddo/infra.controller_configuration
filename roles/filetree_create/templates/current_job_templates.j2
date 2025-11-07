@@ -161,7 +161,8 @@ controller_templates:
 {% if is_aap and (template_overrides_resources.job_template[current_job_templates_asset_value.name].execution_environment is defined
                   or template_overrides_global.job_template.execution_environment is defined
                   or current_job_templates_asset_value.summary_fields.execution_environment is defined) %}
-    execution_environment: "{{ template_overrides_resources.job_template[current_job_templates_asset_value.name].execution_environment
+    execution_environment:
+      name: "{{ template_overrides_resources.job_template[current_job_templates_asset_value.name].execution_environment
                                | default(template_overrides_global.job_template.execution_environment)
                                | default(current_job_templates_asset_value.summary_fields.execution_environment.name) }}"
 {% endif %}

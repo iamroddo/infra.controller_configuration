@@ -6,7 +6,8 @@ controller_projects:
     description: "{{ template_overrides_resources.project[current_projects_asset_value.name].description
                      | default(template_overrides_global.project.description)
                      | default(current_projects_asset_value.description) }}"
-    organization: "{{ current_projects_asset_value.summary_fields.organization.name
+    organization:
+      name: "{{ current_projects_asset_value.summary_fields.organization.name
                       | default(organization if organization != 'ORGANIZATIONLESS'
                       else 'ToDo: The project \'' + current_projects_asset_value.name + '\' must have an organization') }}"
 {% if template_overrides_resources.project[current_projects_asset_value.name].scm_type is defined
@@ -21,7 +22,8 @@ controller_projects:
 {% if template_overrides_resources.project[current_projects_asset_value.name].scm_credential is defined
       or template_overrides_global.scm_credential is defined
       or current_projects_asset_value.summary_fields.credential is defined %}
-    scm_credential: "{{ template_overrides_resources.project[current_projects_asset_value.name].scm_credential
+    credential:
+      name: "{{ template_overrides_resources.project[current_projects_asset_value.name].scm_credential
                         | default(template_overrides_global.scm_credential)
                         | default(current_projects_asset_value.summary_fields.credential.name) }}"
 {% endif %}
