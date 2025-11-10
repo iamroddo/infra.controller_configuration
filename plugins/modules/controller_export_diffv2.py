@@ -183,17 +183,15 @@ EXAMPLES = """
           scm_branch: master
           scm_clean: true
           description: Test Project 1
-          organization:
-            name: Default
+          organization: Default
           wait: true
           update_project: true
         - name: Test Inventory source project with credential
           scm_type: git
           scm_url: https://github.com/ansible/ansible-examples.git
           description: ansible-examples
-          organization:
-            name: Satellite
-          credential: gitlab-personal-access-token for satqe_auto_droid
+          organization: Satellite
+          scm_redential: gitlab-personal-access-token for satqe_auto_droid
           wait: false
     controller_host: https://controller
     controller_username: admin
@@ -303,33 +301,233 @@ def main():
     for resource in export_args:
         try:
             if resource in compare_items:
-                for resource_object in compare_items[resource]:
-                    if with_present:
+                # Create a copy of the compare_items for this resource to avoid modifying the original
+                compare_list = deepcopy(compare_items[resource])
+
+                if with_present:
+                    for resource_object in compare_list:
                         resource_object.update({"state": "present"})
-                    for idx, dict_ in enumerate(awxkit_list[resource]):
-                        if resource == "users":
-                            if resource_object["username"] == dict_["username"]:
-                                awxkit_list[resource].pop(idx)
-                        elif "organization" not in resource_object or resource_object["organization"] is None:
-                            if resource_object["name"] == dict_["name"]:
-                                awxkit_list[resource].pop(idx)
+
+                # Create a list to track items that should be removed from awxkit_list
+                items_to_remove = []
+
+                def items_match(compare_obj, api_obj):
+                    """Return True if the compare_obj should be considered the same as api_obj.
+
+                    Matching rules:
+                    - 'name' must match
+                    - if 'organization' is present in compare_obj, compare its name to api_obj.organization
+                    - for any other key provided in compare_obj (description, scm_url, scm_credential, etc.)
+                      compare the values. If the compare value is a dict, prefer its 'name' field.
+                    - For scm_credential, accept either 'scm_credential' or 'credential' in the api object.
+                    """
+
+                    # Name must match
+                    if compare_obj.get("name") != api_obj.get("name"):
+                        return False
+
+                    # Organization handling
+                    if "organization" in compare_obj:
+                        resource_org = compare_obj.get("organization")
+                        api_org = api_obj.get("organization")
+
+                        # normalize to names
+                        if isinstance(resource_org, dict):
+                            resource_org_name = resource_org.get("name")
                         else:
-                            for idx, dict_ in enumerate(awxkit_list[resource]):
-                                if resource_object["name"] == dict_["name"] and resource_object["organization"]["name"] == dict_["organization"]["name"]:
-                                    awxkit_list[resource].pop(idx)
+                            resource_org_name = resource_org
+
+                        if isinstance(api_org, dict):
+                            api_org_name = api_org.get("name")
+                        else:
+                            # api_org might be an ID or None, try summary_fields
+                            api_org_name = api_org
+                            if api_org is None or isinstance(api_org, int):
+                                sf = api_obj.get("summary_fields", {})
+                                sf_org = sf.get("organization") if isinstance(sf, dict) else None
+                                if isinstance(sf_org, dict):
+                                    api_org_name = sf_org.get("name")
+
+                        if resource_org_name != api_org_name:
+                            return False
+
+                    # Other keys to compare if present in compare_obj
+                    # Map compare keys to possible api keys
+                    key_api_aliases = {
+                        "scm_credential": ["scm_credential", "credential"],
+                        # add other aliases here if needed
+                    }
+
+                    for key, val in compare_obj.items():
+                        if key in ("name", "organization", "state"):
+                            continue
+
+                        # skip empty/None values in compare_obj
+                        if val is None:
+                            continue
+
+                        # Determine api value(s) to compare against
+                        api_keys = key_api_aliases.get(key, [key])
+                        api_val = None
+                        for ak in api_keys:
+                            if ak in api_obj:
+                                api_val = api_obj.get(ak)
+                                break
+
+                        # If api doesn't have the key, consider it a mismatch
+                        if api_val is None:
+                            return False
+
+                        # If compare value is a dict, try to compare by name
+                        if isinstance(val, dict):
+                            val_to_cmp = val.get("name")
+                        else:
+                            val_to_cmp = val
+
+                        if isinstance(api_val, dict):
+                            api_val_to_cmp = api_val.get("name")
+                        else:
+                            api_val_to_cmp = api_val
+                            # For credential keys, if api_val is an ID, try summary_fields
+                            if key in ("scm_credential", "credential") and isinstance(api_val, int):
+                                sf = api_obj.get("summary_fields", {})
+                                sf_cred = sf.get("credential") if isinstance(sf, dict) else None
+                                if isinstance(sf_cred, dict):
+                                    api_val_to_cmp = sf_cred.get("name")
+
+                        if val_to_cmp != api_val_to_cmp:
+                            return False
+
+                    return True
+
+                def normalize_api_item(item):
+                    """Normalize organization and credential fields in an API item.
+
+                    This ensures downstream modules receive unambiguous organization names
+                    and credential names rather than IDs or None values.
+                    """
+                    # Normalize organization to a name when possible
+                    org = item.get("organization")
+                    org_name = None
+
+                    # If the API returned organization as dict -> take name
+                    if isinstance(org, dict):
+                        org_name = org.get("name")
+                    else:
+                        # If API returned an id or left org as numeric/None,
+                        # try to get name from summary_fields.organization
+                        sf = item.get("summary_fields", {})
+                        sf_org = sf.get("organization") if isinstance(sf, dict) else None
+                        if isinstance(sf_org, dict):
+                            org_name = sf_org.get("name")
+
+                    if org_name:
+                        item["organization"] = org_name
+
+                    # Normalize credentials: if there is a credential id but
+                    # summary_fields.credential has name, set the credential field
+                    # to that name for easier matching downstream.
+                    # Consider both scm_credential and credential keys.
+                    for cred_key in ("scm_credential", "credential"):
+                        cred_val = item.get(cred_key)
+                        if cred_val is None:
+                            # try summary_fields
+                            sf = item.get("summary_fields", {})
+                            sf_cred = sf.get("credential") if isinstance(sf, dict) else None
+                            if isinstance(sf_cred, dict) and sf_cred.get("name"):
+                                # set both keys to the human-readable name
+                                item[cred_key] = sf_cred.get("name")
+                                # also set scm_credential for consistency
+                                item.setdefault("scm_credential", sf_cred.get("name"))
+                                break
+                        else:
+                            # If it's an object/dict, normalize to name
+                            if isinstance(cred_val, dict) and cred_val.get("name"):
+                                item[cred_key] = cred_val.get("name")
+
+                for resource_object in compare_list:
+                    for idx, api_item in enumerate(awxkit_list[resource]):
+                        if idx in items_to_remove:
+                            continue
+
+                        # For users, compare by username only
+                        if resource == "users":
+                            if resource_object.get("username") == api_item.get("username"):
+                                items_to_remove.append(idx)
+                                break
+
+                        else:
+                            # Use flexible matching function that checks name and any provided fields
+                            if items_match(resource_object, api_item):
+                                items_to_remove.append(idx)
+                                break
+
+                # Remove matched items in reverse order to maintain indices
+                for idx in sorted(items_to_remove, reverse=True):
+                    awxkit_list[resource].pop(idx)
+
                 # After looping through every item in the compare_items the remaining are set to absent.
                 if set_absent:
                     if awxkit_list[resource]:
                         for remaining_item in awxkit_list[resource]:
+                            # mark absent
                             remaining_item.update({"state": "absent"})
+                            # normalize fields using helper
+                            normalize_api_item(remaining_item)
 
                 if with_present:
-                    output_list[resource] = compare_items[resource]
-                    output_list[resource].extend(awxkit_list[resource])
+                    output_list[resource] = compare_list
+                    if awxkit_list[resource]:
+                        # normalize any remaining API items before adding to output
+                        for api_item in awxkit_list[resource]:
+                            normalize_api_item(api_item)
+                        output_list[resource].extend(awxkit_list[resource])
                 else:
+                    # normalize all API items before adding to output
+                    for api_item in awxkit_list[resource]:
+                        normalize_api_item(api_item)
                     output_list[resource] = awxkit_list[resource]
+            else:
+                # Resource not in compare_items, but was exported
+                if set_absent and awxkit_list.get(resource):
+                    for item in awxkit_list[resource]:
+                        item.update({"state": "absent"})
+                        normalize_api_item(item)
+                    output_list[resource] = awxkit_list[resource]
+
         except Exception as e:
-            module.fail_json(msg="Failed to export assets {0} with resource {1}".format(e, resource_object))
+            module.fail_json(msg="Failed to process resource {0}: {1}".format(resource, str(e)))
+    # Post-process output_list to detect ambiguous name+organization entries
+    # and attach an identifier to make downstream selection unambiguous.
+    for resource, items in list(output_list.items()):
+        # Build a map of (name, organization) -> list of items
+        name_org_map = {}
+        for itm in items:
+            name = itm.get("name")
+            org = itm.get("organization")
+            key = (name, org)
+            name_org_map.setdefault(key, []).append(itm)
+
+        # Mark ambiguous keys and attach an identifier
+        for key, grouped in name_org_map.items():
+            if len(grouped) > 1:
+                # ambiguous across orgs or duplicates — mark all
+                for g in grouped:
+                    g["ambiguous"] = True
+                    # prefer id when present
+                    if g.get("id"):
+                        g["identifier"] = str(g.get("id"))
+                    else:
+                        # fallback to name|org string
+                        g["identifier"] = "{0}|{1}".format(g.get("name"), g.get("organization"))
+            else:
+                g = grouped[0]
+                g["ambiguous"] = False
+                if g.get("id"):
+                    g["identifier"] = str(g.get("id"))
+                else:
+                    g["identifier"] = "{0}|{1}".format(g.get("name"), g.get("organization"))
+
     module.json_output["difference"] = output_list
     module.exit_json(**module.json_output)
 
